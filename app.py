@@ -252,6 +252,7 @@ p, li, .stMarkdown p { font-size: 12px !important; }
 .kpi-card .kpi-value.pos { color: #1B5A43; }
 .kpi-card .kpi-value.neg { color: #C0392B; }
 .kpi-card .kpi-sub { font-size: 10px; opacity: 0.5; margin-top: 3px; }
+.kpi-card .kpi-sub2 { font-size: 10px; opacity: 0.35; margin-top: 1px; font-style: italic; }
 
 /* CM equation pill */
 .cm-equation {
@@ -567,6 +568,7 @@ else:
     )
 
     # -------- KPI BAR --------
+    arr_k = annual_revenue_eur / 1000
     k1, k2, k3, k4, k5 = st.columns(5)
     cm_cls = "pos" if contribution_margin_pct >= 0 else "neg"
     eb_cls = "pos" if ebitda_current_k >= 0 else "neg"
@@ -577,13 +579,15 @@ else:
           <div class="kpi-label">Net book</div>
           <div class="kpi-value">{loan_book_k:,.0f}<span style="font-size:13px;"> k€</span></div>
           <div class="kpi-sub">{cycles_per_month:.2f} cycles/mois</div>
+          <div class="kpi-sub2">{nb_loans_per_month:,.0f} prêts/mois</div>
         </div>""", unsafe_allow_html=True)
     with k2:
         st.markdown(f"""
         <div class="kpi-card">
           <div class="kpi-label">Volume mensuel</div>
           <div class="kpi-value">{monthly_volume_eur/1000:,.0f}<span style="font-size:13px;"> k€</span></div>
-          <div class="kpi-sub">{nb_loans_per_month:,.0f} prêts</div>
+          <div class="kpi-sub">{nb_clients_per_month:,.0f} retailers actifs</div>
+          <div class="kpi-sub2">{new_clients_per_month:.0f} new retailers/mois</div>
         </div>""", unsafe_allow_html=True)
     with k3:
         st.markdown(f"""
@@ -591,6 +595,7 @@ else:
           <div class="kpi-label">MRR</div>
           <div class="kpi-value">{monthly_revenue_eur/1000:,.1f}<span style="font-size:13px;"> k€</span></div>
           <div class="kpi-sub">{revenu_pct:.2f}% take-rate</div>
+          <div class="kpi-sub2">ARR {arr_k:,.0f} k€</div>
         </div>""", unsafe_allow_html=True)
     with k4:
         st.markdown(f"""
@@ -757,9 +762,33 @@ else:
             st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
 
             # Break-even progress bar
-            if contribution_margin_pct > 0:
-                be_vol_k = (opex_current_k + cogs_k + cac_k) / (contribution_margin_pct / 100)
-                be_book_k = be_vol_k / cycles_per_month if cycles_per_month > 0 else 0
+            # Analytical fixed-point solution: solve book_be such that EBITDA=0
+            # accounting for cogs and cac scaling with book size.
+            # α = clients per k€ of net book
+            # Case A (no new client acq): book_be = opex / (cycles×cm% - α×cogs/1000)
+            # Case B (with new client acq): book_be = (opex+D) / (cycles×cm% - α×cogs/1000 - α×cac/(gm×1000))
+            #   where D = base_clients × cac / (gm × 1000)
+            if contribution_margin_pct > 0 and avg_loan_value_eur > 0 and tx_per_client_per_month > 0:
+                alpha = 1000 * cycles_per_month / (avg_loan_value_eur * tx_per_client_per_month)
+                A_coeff = cycles_per_month * (contribution_margin_pct / 100)
+                B_coeff = alpha * cogs_per_client_eur / 1000
+                net_A = A_coeff - B_coeff
+                # Case A: no new client acquisition
+                be_book_case_a = opex_current_k / net_A if net_A > 0 else float("inf")
+                nb_clients_at_a = be_book_case_a * alpha
+                if nb_clients_at_a <= base_clients:
+                    be_book_k_fixed = be_book_case_a
+                else:
+                    # Case B: new client acquisition costs scale with book
+                    C_coeff = alpha * cac_per_new_client_eur / (growth_months * 1000)
+                    D_offset = base_clients * cac_per_new_client_eur / (growth_months * 1000)
+                    net_B = net_A - C_coeff
+                    be_book_k_fixed = (opex_current_k + D_offset) / net_B if net_B > 0 else float("inf")
+            else:
+                be_book_k_fixed = float("inf")
+
+            if be_book_k_fixed < float("inf") and be_book_k_fixed > 0:
+                be_book_k = be_book_k_fixed
                 ratio = loan_book_k / be_book_k if be_book_k > 0 else 0
                 bar_pct = min(100, ratio * 100)
                 bar_color = "#1B5A43" if ratio >= 1.0 else "#064C72"
